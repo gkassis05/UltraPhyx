@@ -30,12 +30,6 @@ UltraPhyx is modular, differentiable-compatible, and built with physics + anatom
 ## Installation
 
 ```bash
-pip install UltraPhyx
-```
-
-Or install locally:
-
-```bash
 git clone https://github.com/gkassis05/UltraPhyx
 cd UltraPhyx
 pip install -e .
