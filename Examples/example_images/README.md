@@ -1,1 +1,1 @@
-example1.jpg image was obtained from the dataset of ultrasound iamges that UltraSam was trained on (https://github.com/CAMMA-public/UltraSam)
+example1.jpg image was obtained from the dataset of ultrasound images that UltraSam was trained on (https://github.com/CAMMA-public/UltraSam)
