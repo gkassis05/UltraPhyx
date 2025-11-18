@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "UltraPhyx"
+version = "0.1.0"
+description = "Physics-grounded ultrasound data augmentation library for machine learning and robotics."
+authors = [
+  { name = "George Kassis"}
+]
+readme = "README.md"
+requires-python = ">=3.9"
+
+dependencies = [
+  "numpy>=1.20",
+  "opencv-python>=4.5",
+  "matplotlib>=3.5",
+  "torch>=1.12",
+]
+
+keywords = [
+  "ultrasound",
+  "augmentation",
+  "medical imaging",
+  "data augmentation",
+  "machine learning",
+  "simulation",
+  "deep learning",
+  "robotics",
+]
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Healthcare Industry",
+  "License :: MIT License",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+[project.urls]
+Homepage = "https://github.com/gkassis05/UltraPhyx"
+Documentation = "https://github.com/gkassis05/UltraPhyx"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+packages = ["UltraPhyx"]
+
+[tool.black]
+line-length = 88
+target-version = ['py39']
+
+[tool.isort]
+profile = "black"
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "W", "B", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = 3.9
+ignore_missing_imports = true
+strict = false
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["UltraPhyx"]
