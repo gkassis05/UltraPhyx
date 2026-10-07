@@ -1287,109 +1287,90 @@ def analyze_ultrasound_scan(
 # ============================================================
 # 8. LONGEST INTERNAL LINE SEGMENT INSIDE STRUCTURE
 # ============================================================
+import hashlib
+from collections import OrderedDict
 
-def _longest_internal_line(struct_mask, 
-                           max_tilt_deg=45, 
-                           num_angles=91, 
-                           num_offsets=200,
-                           dilate_amount=5):
-    """
-    Find the longest straight line inside struct_mask.
-    First dilate the mask to allow straighter internal lines
-    for slightly curved or thin structures.
-    """
+# Metadata only: image arrays are never retained. Each worker has its own cache.
+_INTERNAL_LINE_CACHE = OrderedDict()
+_INTERNAL_LINE_CACHE_LIMIT = 4096
 
-    # ------------------------------------------------------------
-    # 1. Dilate the structure slightly
-    # ------------------------------------------------------------
+def _longest_internal_line(struct_mask, max_tilt_deg=45, num_angles=91,
+                           num_offsets=200, dilate_amount=5):
+    """Same sampled search grid, batched across offsets to avoid tiny allocations."""
+    struct_mask = np.asarray(struct_mask, dtype=bool)
+    if struct_mask.ndim != 2 or struct_mask.size == 0:
+        raise ValueError('struct_mask must be a nonempty 2D array.')
+    for value, name in ((num_angles, 'num_angles'), (num_offsets, 'num_offsets'),
+                        (dilate_amount, 'dilate_amount')):
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+            raise TypeError(name + ' must be an integer.')
+    if num_angles < 1 or num_offsets < 1 or dilate_amount < 0:
+        raise ValueError('Invalid angle, offset, or dilation count.')
+    if not np.isfinite(max_tilt_deg) or max_tilt_deg < 0:
+        raise ValueError('max_tilt_deg must be finite and nonnegative.')
+    key = None
+    if _INTERNAL_LINE_CACHE_LIMIT > 0:
+        digest = hashlib.sha256(np.ascontiguousarray(struct_mask).view(np.uint8)).digest()
+        key = (struct_mask.shape, float(max_tilt_deg), int(num_angles),
+               int(num_offsets), int(dilate_amount), digest)
+        if key in _INTERNAL_LINE_CACHE:
+            cached = _INTERNAL_LINE_CACHE[key]
+            _INTERNAL_LINE_CACHE.move_to_end(key)
+            return None if cached is None else cached.copy()
     if dilate_amount > 0:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            (dilate_amount, dilate_amount)
-        )
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                          (dilate_amount, dilate_amount))
         struct_mask = cv2.dilate(struct_mask.astype(np.uint8), kernel).astype(bool)
-
-    # ------------------------------------------------------------
-    # 2. Original logic begins
-    # ------------------------------------------------------------
     H, W = struct_mask.shape
     ys, xs = np.where(struct_mask)
-    if len(xs) == 0:
+    if xs.size == 0:
         return None
-
-    cx = xs.mean()
-    cy = ys.mean()
-
-    best_len = -1
-    best_pts = None
-    best_angle = None
-
+    cx, cy = xs.mean(), ys.mean()
+    dx, dy = xs - cx, ys - cy
+    best_len, best_pts, best_angle = -1.0, None, None
     angles = np.linspace(-max_tilt_deg, max_tilt_deg, num_angles)
-    angles_rad = np.deg2rad(angles)
-
-    for ang, rad in zip(angles, angles_rad):
+    step = 0.5
+    for ang, rad in zip(angles, np.deg2rad(angles)):
         vx, vy = np.cos(rad), np.sin(rad)
         nx, ny = -vy, vx
-        normal_pos = (xs - cx) * nx + (ys - cy) * ny
-        along_pos = (xs - cx) * vx + (ys - cy) * vy
-
+        normal_pos = dx * nx + dy * ny
+        along_pos = dx * vx + dy * vy
         offsets = np.linspace(normal_pos.min(), normal_pos.max(), num_offsets)
-        step = 0.5
-        along = np.arange(
-            along_pos.min() - 1.0,
-            along_pos.max() + 1.0,
-            step,
-        )
-
-        for offset in offsets:
-            x_line = cx + offset * nx + along * vx
-            y_line = cy + offset * ny + along * vy
-
-            ix = np.rint(x_line).astype(int)
-            iy = np.rint(y_line).astype(int)
-            in_image = (
-                (ix >= 0) & (ix < W)
-                & (iy >= 0) & (iy < H)
-            )
-
-            inside = np.zeros(along.size, dtype=bool)
-            inside[in_image] = struct_mask[
-                iy[in_image], ix[in_image]
-            ]
-
-            edges = np.diff(
-                np.r_[False, inside, False].astype(np.int8)
-            )
-            starts = np.flatnonzero(edges == 1)
-            stops = np.flatnonzero(edges == -1)
-
-            if starts.size == 0:
+        along = np.arange(along_pos.min() - 1.0, along_pos.max() + 1.0, step)
+        # Bound working memory for large source images (roughly a few MB).
+        block_rows = max(1, min(num_offsets, 131072 // max(1, along.size)))
+        for start in range(0, num_offsets, block_rows):
+            off = offsets[start:start + block_rows, None]
+            x_line = cx + off * nx + along[None, :] * vx
+            y_line = cy + off * ny + along[None, :] * vy
+            ix = np.rint(x_line).astype(np.intp)
+            iy = np.rint(y_line).astype(np.intp)
+            valid = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
+            inside = np.zeros(ix.shape, dtype=bool)
+            inside[valid] = struct_mask[iy[valid], ix[valid]]
+            padded = np.zeros((inside.shape[0], inside.shape[1] + 2), dtype=np.int8)
+            padded[:, 1:-1] = inside
+            edges = np.diff(padded, axis=1)
+            rows, first = np.nonzero(edges == 1)
+            _, stop = np.nonzero(edges == -1)
+            if first.size == 0:
                 continue
-
-            # A gap ends a segment; never join across the gap.
-            run = int(np.argmax(stops - starts))
-            first = int(starts[run])
-            last = int(stops[run] - 1)
-            length = float((last - first) * step)
-
+            # Row-major order preserves the original offset/run tie-breaking.
+            lengths = stop - first
+            winner = int(np.argmax(lengths))
+            length = float((lengths[winner] - 1) * step)
             if length > 0 and length > best_len:
+                row, lo, hi = int(rows[winner]), int(first[winner]), int(stop[winner] - 1)
                 best_len = length
-                best_pts = (
-                    float(x_line[first]),
-                    float(y_line[first]),
-                    float(x_line[last]),
-                    float(y_line[last]),
-                )
+                best_pts = (float(x_line[row, lo]), float(y_line[row, lo]),
+                            float(x_line[row, hi]), float(y_line[row, hi]))
                 best_angle = float(ang)
-
-    if best_pts is None:
-        return None
-
-    return {
-        "angle_deg": best_angle,
-        "length": best_len,
-        "x0": best_pts[0],
-        "y0": best_pts[1],
-        "x1": best_pts[2],
-        "y1": best_pts[3]
-    }
+    result = None if best_pts is None else dict(
+        angle_deg=best_angle, length=best_len,
+        x0=best_pts[0], y0=best_pts[1], x1=best_pts[2], y1=best_pts[3])
+    if key is not None:
+        _INTERNAL_LINE_CACHE[key] = None if result is None else result.copy()
+        _INTERNAL_LINE_CACHE.move_to_end(key)
+        while len(_INTERNAL_LINE_CACHE) > _INTERNAL_LINE_CACHE_LIMIT:
+            _INTERNAL_LINE_CACHE.popitem(last=False)
+    return result
