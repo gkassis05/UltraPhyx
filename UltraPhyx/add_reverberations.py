@@ -291,7 +291,7 @@ def add_reverberations(
         plt.show()
 
     return out, {
-        "applied": True,
+        "applied": bool(np.any(out != gray)),
         "structure_idx": chosen_idx,
         "line_info": info_line,
         "n_reverbs": n_reverbs,
