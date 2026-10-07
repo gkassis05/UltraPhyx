@@ -53,8 +53,8 @@ def adjust_speckle(
     H, W = gray.shape
 
     clean = analysis.get("clean_mask", None)
-    if clean is None:
-        return gray, {"applied": False, "reason": "no clean_mask"}
+    if clean is None or not np.any(clean):
+        return gray.copy(), {"applied": False, "reason": "empty clean_mask"}
     clean_bool = clean.astype(bool)
 
     # ---------------------------------------------
@@ -76,8 +76,7 @@ def adjust_speckle(
     # Sample new speckle field
     # ---------------------------------------------
     speck = sample_nakagami((H, W), m=target_m, Omega=target_Omega, rng=rng)
-    speck -= speck.min()
-    speck /= (speck.max() + 1e-8)
+    speck = speck / max(Omega_orig, 1e-8)
 
     # ---------------------------------------------
     # Normalize original intensities into [0,1]
@@ -106,6 +105,7 @@ def adjust_speckle(
         t = d / feather_px
         sharp = 7.0
         alpha = 1.0 / (1.0 + np.exp(-sharp * (t - 0.5)))
+        alpha = alpha * clean_bool.astype(np.float32)
 
         # Only blend inside mask
         out = gray.astype(np.float32)
