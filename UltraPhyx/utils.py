@@ -10,14 +10,15 @@ ProbeType = Literal["linear", "curvilinear", "phased", "unknown"]
 # 0. UTIL: GRAYSCALE + UINT8 + Nakagami
 # ============================================================
 
-def sample_param(v):
+def sample_param(v, rng=None):
     """
     Handle UltraPhyx parameter sampling:
     - If v is a scalar (int/float/bool), return it as is
     - If v is a tuple/list (low, high):
-        * If both are ints → sample int
-        * If either is float → sample float with 0.05 increments
+        * If both are ints → sample int uniformly from [low, high]
+        * If either is float → sample float uniformly from [low, high)
     """
+    rng = np.random.default_rng() if rng is None else rng
     # Not a range
     if not isinstance(v, (tuple, list)):
         return v
@@ -26,27 +27,14 @@ def sample_param(v):
         raise ValueError(f"Range parameter must be 2-length tuple, got {v}")
 
     a, b = v
-
-    # Case 1: both integers → sample integer
-    if isinstance(a, int) and isinstance(b, int):
-        return np.random.randint(a, b + 1)
-
-    # Case 2: floats or mixed → sample float with 0.05 increments
-    a = float(a)
-    b = float(b)
-
-    # Step size = 0.05
-    step = 0.05
-    n_steps = int(round((b - a) / step)) + 1
-
-    # Generate grid of possible values
-    grid = a + step * np.arange(n_steps)
-
-    # Select a random value from the grid
-    val = float(np.random.choice(grid))
-
-    # Round nicely to 2 decimals for cleanliness
-    return round(val, 2)
+    
+    if a > b:
+        raise ValueError(f"Range lower bound exceeds upper bound: {v}")
+        
+    if isinstance(a, (int, np.integer)) and isinstance(b, (int, np.integer)):
+        return int(rng.integers(int(a), int(b) + 1))
+        
+    return float(rng.uniform(float(a), float(b)))
 
 
 def _ensure_uint8(img: np.ndarray) -> np.ndarray:
