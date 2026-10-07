@@ -52,6 +52,11 @@ def adjust_speckle(
         gray = cv2.cvtColor(img_u8, cv2.COLOR_BGR2GRAY)
     H, W = gray.shape
 
+    if not np.isfinite(strength) or not 0.0 <= strength <= 1.0:
+        raise ValueError("strength must be finite and between 0 and 1.")
+    if strength == 0.0:
+        return gray.copy(), {"applied": False, "reason": "zero strength"}
+
     clean = analysis.get("clean_mask", None)
     if clean is None or not np.any(clean):
         return gray.copy(), {"applied": False, "reason": "empty clean_mask"}
