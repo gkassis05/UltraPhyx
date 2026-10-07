@@ -42,31 +42,70 @@ class UltraPhyxAugmentor:
         if not (0.0 <= self.cfg.p_global <= 1.0):
             raise ValueError(f"p_global must be between 0.0 and 1.0, got {self.cfg.p_global}")
 
-        if not isinstance(self.cfg.k, int) or self.cfg.k < 0:
-            raise ValueError(f"k must be a non-negative integer, got {self.cfg.k}")
+        if (isinstance(self.cfg.k, (bool, np.bool_))
+                or not isinstance(self.cfg.k, (int, np.integer))
+                or self.cfg.k < 0):
+            raise ValueError("k must be a non-negative integer.")
 
-        for name in (self.cfg.artifact_configs or {}).keys():
-            if name not in self.ops:
-                raise ValueError(f"Unknown artifact '{name}'. Supported artifacts: {list(self.ops.keys())}")
+        if not isinstance(self.cfg.artifact_configs, dict):
+            raise TypeError("artifact_configs must be a dictionary.")
+        if not isinstance(self.cfg.artifact_probs, dict):
+            raise TypeError("artifact_probs must be a dictionary.")
 
+        names = set(self.cfg.artifact_configs) | set(self.cfg.artifact_probs)
+        unknown = names - set(self.ops)
+        if unknown:
+            raise ValueError(f"Unknown artifact names: {sorted(unknown)}")
+
+        for name, parameters in self.cfg.artifact_configs.items():
+            if parameters is not None and not isinstance(parameters, dict):
+                raise TypeError(f"{name}: use a parameter dictionary or None.")
+
+        for name, value in self.cfg.artifact_probs.items():
+            weight = float(value)
+            if not np.isfinite(weight) or weight < 0:
+                raise ValueError(f"{name}: weight must be finite and nonnegative.")
+            if self.cfg.mode == "any" and weight > 1:
+                raise ValueError(f"{name}: probability must not exceed 1.")
     # -----------------------------------------
     # tensor/np helpers
     # -----------------------------------------
     def _to_numpy(self, img):
         if isinstance(img, torch.Tensor):
-            if img.min() < 0:
-                raise ValueError("Input tensor has negative values. UltraPhyx must run before normalization.")
+            if img.layout != torch.strided:
+                raise TypeError("Only dense, strided image tensors are supported.")
             if img.ndim not in (2, 3) or (img.ndim == 3 and img.shape[0] != 1):
-                raise ValueError(f"Unsupported tensor shape {img.shape}. Expected HxW or 1xHxW.")
-            
-            arr = img.detach().cpu().numpy()
-            return arr[0] if img.ndim == 3 else arr
-        else:
-            if img.min() < 0:
-                raise ValueError("Input array has negative values. UltraPhyx must run before normalization.")
+                raise ValueError("Expected a tensor with shape HxW or 1xHxW.")
+            allowed = (torch.uint8, torch.float16, torch.bfloat16,
+                       torch.float32, torch.float64)
+            if img.dtype not in allowed:
+                raise TypeError("Use uint8 or a supported floating-point tensor.")
+            cpu = img.detach().cpu()
+            if cpu.dtype == torch.bfloat16:
+                cpu = cpu.float()
+            arr = cpu.numpy()
+            if img.ndim == 3:
+                arr = arr[0]
+        elif isinstance(img, np.ndarray):
             if img.ndim != 2:
-                raise ValueError(f"Unsupported numpy shape {img.shape}. Expected HxW.")
-            return img
+                raise ValueError("Expected a NumPy image with shape HxW.")
+            arr = img
+        else:
+            raise TypeError("Image must be a NumPy array or PyTorch tensor.")
+
+        if arr.size == 0:
+            raise ValueError("Image must not be empty.")
+        if arr.dtype != np.uint8 and not np.issubdtype(arr.dtype, np.floating):
+            raise TypeError("Use uint8 [0,255] or floating-point [0,1] images.")
+        if not np.isfinite(arr).all():
+            raise ValueError("Image contains NaN or infinity.")
+        if np.issubdtype(arr.dtype, np.floating):
+            if arr.min() < 0 or arr.max() > 1:
+                raise ValueError(
+                    "Float images must be in [0,1]. Divide float [0,255] "
+                    "images by 255 before augmentation; normalize afterward."
+                )
+        return arr
 
     def _to_tensor_like(self, np_img, template):
         if isinstance(template, torch.Tensor):
@@ -167,6 +206,7 @@ class UltraPhyxAugmentor:
         show_choices=True, prints which artifacts are applied.
         plan lets you pass a pre-sampled augmentation plan (for sequences).
         """
+        img_np = self._to_numpy(img)
         if plan is None:
             plan = self.sample_plan()
 
@@ -178,7 +218,15 @@ class UltraPhyxAugmentor:
         if show_choices:
             print(f"Selected artifacts: {', '.join([n for n, p in plan])}")
 
-        img_np = self._to_numpy(img)
+        if not isinstance(analysis, dict):
+            raise TypeError("analysis must be a dictionary.")
+        clean = np.asarray(analysis.get("clean_mask"))
+        if clean.shape != img_np.shape or not np.isfinite(clean).all():
+            raise ValueError("clean_mask must be finite and match the image shape.")
+        for mask in analysis.get("structure_masks", []):
+            mask = np.asarray(mask)
+            if mask.shape != img_np.shape or not np.isfinite(mask).all():
+                raise ValueError("Each structure mask must match the image shape.")
         img_np = _ensure_uint8(img_np)
         out = img_np.copy()
 
@@ -207,4 +255,11 @@ class UltraPhyxAugmentor:
         if not applied_success:
             return img.clone() if isinstance(img, torch.Tensor) else img.copy()
 
-        return self._to_tensor_like(out, img)
+        restored = self._to_tensor_like(out, img)
+        changed = out != img_np
+        if isinstance(img, torch.Tensor):
+            changed = torch.from_numpy(changed).to(device=img.device)
+            if img.ndim == 3:
+                changed = changed.unsqueeze(0)
+            return torch.where(changed, restored, img)
+        return np.where(changed, restored, img).astype(img.dtype, copy=False)
