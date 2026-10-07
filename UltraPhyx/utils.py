@@ -440,6 +440,9 @@ def _fit_two_lines_and_apex(xs: np.ndarray, ys: np.ndarray, show_debug: bool = F
             best_resid = resid
             best_params = ((m1, b1), (m2, b2), (apex_x, apex_y), resid)
 
+    if best_params[0] is None:
+        return None, None, None, np.inf
+
     (m1, b1), (m2, b2), (apex_x, apex_y), best_resid = best_params
 
     if show_debug and m1 is not None:
@@ -719,9 +722,9 @@ def _unknown_geometry_defaults(
         apex_y = -20.0
 
     theta_span = np.deg2rad(min(60.0, width / 5.0))
-    theta_min = -theta_span / 2.0
-    theta_max = +theta_span / 2.0
-    theta_center = 0.0
+    theta_center = np.pi / 2.0
+    theta_min = theta_center - theta_span / 2.0
+    theta_max = theta_center + theta_span / 2.0
     r_max = float(width * 2.0)
 
     geom = dict(
@@ -1325,47 +1328,59 @@ def _longest_internal_line(struct_mask,
     angles_rad = np.deg2rad(angles)
 
     for ang, rad in zip(angles, angles_rad):
-        vx = np.cos(rad)
-        vy = np.sin(rad)
+        vx, vy = np.cos(rad), np.sin(rad)
+        nx, ny = -vy, vx
+        normal_pos = (xs - cx) * nx + (ys - cy) * ny
+        along_pos = (xs - cx) * vx + (ys - cy) * vy
 
-        nx = -vy
-        ny = vx
+        offsets = np.linspace(normal_pos.min(), normal_pos.max(), num_offsets)
+        step = 0.5
+        along = np.arange(
+            along_pos.min() - 1.0,
+            along_pos.max() + 1.0,
+            step,
+        )
 
-        offs = np.linspace(-150, 150, num_offsets)
+        for offset in offsets:
+            x_line = cx + offset * nx + along * vx
+            y_line = cy + offset * ny + along * vy
 
-        for o in offs:
-            px = cx + o * nx
-            py = cy + o * ny
+            ix = np.rint(x_line).astype(int)
+            iy = np.rint(y_line).astype(int)
+            in_image = (
+                (ix >= 0) & (ix < W)
+                & (iy >= 0) & (iy < H)
+            )
 
-            # forward
-            x0, y0 = px, py
-            lf = 0
-            while True:
-                x0 += vx
-                y0 += vy
-                ix = int(round(x0))
-                iy = int(round(y0))
-                if ix < 0 or ix >= W or iy < 0 or iy >= H or not struct_mask[iy, ix]:
-                    break
-                lf += 1
+            inside = np.zeros(along.size, dtype=bool)
+            inside[in_image] = struct_mask[
+                iy[in_image], ix[in_image]
+            ]
 
-            # backward
-            x1, y1 = px, py
-            lb = 0
-            while True:
-                x1 -= vx
-                y1 -= vy
-                ix = int(round(x1))
-                iy = int(round(y1))
-                if ix < 0 or ix >= W or iy < 0 or iy >= H or not struct_mask[iy, ix]:
-                    break
-                lb += 1
+            edges = np.diff(
+                np.r_[False, inside, False].astype(np.int8)
+            )
+            starts = np.flatnonzero(edges == 1)
+            stops = np.flatnonzero(edges == -1)
 
-            total = lf + lb
-            if total > best_len:
-                best_len = total
-                best_pts = (x0, y0, x1, y1)
-                best_angle = ang
+            if starts.size == 0:
+                continue
+
+            # A gap ends a segment; never join across the gap.
+            run = int(np.argmax(stops - starts))
+            first = int(starts[run])
+            last = int(stops[run] - 1)
+            length = float((last - first) * step)
+
+            if length > 0 and length > best_len:
+                best_len = length
+                best_pts = (
+                    float(x_line[first]),
+                    float(y_line[first]),
+                    float(x_line[last]),
+                    float(y_line[last]),
+                )
+                best_angle = float(ang)
 
     if best_pts is None:
         return None
