@@ -21,7 +21,7 @@ def add_mirror(
     original_remaining_threshold_percentage: float = 0.01,
     opp_angle_thresh_deg: float = 45,
     seed: Optional[int] = None,
-    show_debug: bool = True
+    show_debug: bool = False
 ):
 
     rng = np.random.default_rng(seed)
@@ -122,11 +122,16 @@ def add_mirror(
     Xr = X - 2 * a * D
     Yr = Y - 2 * b * D
 
+    in_bounds = (
+        (Xr >= 0) & (Xr <= W - 1)
+        & (Yr >= 0) & (Yr <= H - 1)
+    )
+
     Xr_i = np.clip(Xr.astype(int), 0, W - 1)
     Yr_i = np.clip(Yr.astype(int), 0, H - 1)
 
     # source must be clean
-    src_valid = clean[Yr_i, Xr_i]
+    src_valid = in_bounds & clean[Yr_i, Xr_i]
 
     # ======================================================
     # NEW PHYSICS LIMIT:
@@ -153,8 +158,10 @@ def add_mirror(
     # -------------------------
     # RANDOM DEPTH FRACTION (skewed deeper)
     # -------------------------
-    low = 0.1
-    high = max_depth_fraction
+    high = float(max_depth_fraction)
+    if not 0.0 < high <= 1.0:
+        raise ValueError("max_depth_fraction must be in (0, 1].")
+    low = min(0.1, high)
     p = 0.5   # lower p => stronger skew toward deeper
     
     U = rng.uniform(0.0, 1.0)
