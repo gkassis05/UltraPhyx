@@ -32,7 +32,10 @@ def add_mirror(
     img_u8 = _ensure_uint8(img)
     gray = img_u8 if img_u8.ndim == 2 else cv2.cvtColor(img_u8, cv2.COLOR_BGR2GRAY)
     H, W = gray.shape
-
+    if not np.isfinite(mirror_strength) or not 0.0 <= mirror_strength <= 1.0:
+        raise ValueError("mirror_strength must be finite and between 0 and 1.")
+    if mirror_strength == 0.0:
+        return gray.copy(), {"applied": False, "reason": "zero mirror strength"}
     clean = analysis["clean_mask"].astype(bool)
     structs = analysis["structure_masks"]
 
@@ -211,7 +214,7 @@ def add_mirror(
     
         # Only apply blending at locations where boundary is near
         # i.e. where dist < lateral_blur_px
-        mask_boundary = (dist < lateral_blur_px)
+        mask_boundary = valid & (dist < lateral_blur_px)
         artifact[mask_boundary] = blended[mask_boundary]
 
 
@@ -252,7 +255,7 @@ def add_mirror(
         plt.show()
 
     return out, {
-        "applied": True,
+        "applied": bool(np.any(out != gray)),
         "structure_index": idx,
         "line_info": info_line,
         "xmin": xmin,
