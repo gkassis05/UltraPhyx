@@ -54,18 +54,35 @@ class UltraPhyxAugmentor:
     # -----------------------------------------
     def _to_numpy(self, img):
         if isinstance(img, torch.Tensor):
-            if img.ndim == 3:
-                return np.ascontiguousarray(img.permute(1,2,0).cpu().numpy())
-            return img.cpu().numpy()
-        return img
+            if img.min() < 0:
+                raise ValueError("Input tensor has negative values. UltraPhyx must run before normalization.")
+            if img.ndim not in (2, 3) or (img.ndim == 3 and img.shape[0] != 1):
+                raise ValueError(f"Unsupported tensor shape {img.shape}. Expected HxW or 1xHxW.")
+            
+            arr = img.detach().cpu().numpy()
+            return arr[0] if img.ndim == 3 else arr
+        else:
+            if img.min() < 0:
+                raise ValueError("Input array has negative values. UltraPhyx must run before normalization.")
+            if img.ndim != 2:
+                raise ValueError(f"Unsupported numpy shape {img.shape}. Expected HxW.")
+            return img
 
     def _to_tensor_like(self, np_img, template):
         if isinstance(template, torch.Tensor):
-            out = torch.from_numpy(np_img)
-            if out.ndim == 2:
-                out = out.unsqueeze(-1)
-            return out.permute(2,0,1).float() / 255.0
-        return np_img
+            out = torch.from_numpy(np_img).to(device=template.device)
+            if template.is_floating_point():
+                out = out.to(template.dtype) / 255.0
+            else:
+                out = out.to(template.dtype)
+            
+            if template.ndim == 3:
+                out = out.unsqueeze(0)
+            return out
+        else:
+            if np.issubdtype(template.dtype, np.floating):
+                return (np_img.astype(template.dtype) / 255.0)
+            return np_img.astype(template.dtype)
 
     # -----------------------------------------
     # SAMPLE PARAMETERS FOR ONE ARTIFACT
@@ -150,25 +167,44 @@ class UltraPhyxAugmentor:
         show_choices=True, prints which artifacts are applied.
         plan lets you pass a pre-sampled augmentation plan (for sequences).
         """
-        # 5C: Generate the plan if not provided
         if plan is None:
             plan = self.sample_plan()
 
         if not plan:
             if show_choices:
-                print("No artifacts applied.")
-            # 5C: Fast exit if no plan
+                print("No artifacts selected/applied.")
             return img.clone() if isinstance(img, torch.Tensor) else img.copy()
 
         if show_choices:
-            print(f"Applying artifacts: {', '.join([n for n, p in plan])}")
+            print(f"Selected artifacts: {', '.join([n for n, p in plan])}")
 
         img_np = self._to_numpy(img)
         img_np = _ensure_uint8(img_np)
         out = img_np.copy()
 
-        # 5C: apply artifacts loop with passed-down parameters
+        applied_success = []
+        applied_failed = []
+
+        # apply artifacts loop with passed-down parameters
         for name, params in plan:
+            before = out.copy()
             out, info = self.ops[name](analysis, out, **params)
+            
+            changed = not np.array_equal(before, out)
+            if changed:
+                applied_success.append(name)
+            else:
+                reason = info.get("reason", "no visible change")
+                applied_failed.append(f"{name} ({reason})")
+
+        if show_choices:
+            if applied_success:
+                print(f"Successfully applied: {', '.join(applied_success)}")
+            if applied_failed:
+                print(f"Failed to apply: {', '.join(applied_failed)}")
+
+        # Fast exit identity if no pixels were actually changed
+        if not applied_success:
+            return img.clone() if isinstance(img, torch.Tensor) else img.copy()
 
         return self._to_tensor_like(out, img)
