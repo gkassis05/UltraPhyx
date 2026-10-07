@@ -220,6 +220,9 @@ def add_reverberations(
         )
         if not np.any(valid):
             continue
+            
+        # apply the clean-mask restriction to valid itself to keep source intensities aligned
+        valid[valid] &= clean_bool[ys_r[valid], xs_r[valid]]
 
         xs_r = xs_r[valid]
         ys_r = ys_r[valid]
@@ -258,10 +261,11 @@ def add_reverberations(
             alpha_edge = 1.0 / (1.0 + np.exp(-sharp * (t - 0.5)))
 
             blended = alpha_edge * artifact + (1 - alpha_edge) * gray
-            artifact[dist < lateral_feather_px] = blended[dist < lateral_feather_px]
+            edge = mask_art.astype(bool) & (dist < lateral_feather_px)
+            artifact[edge] = blended[edge]
 
     out = gray.astype(float)
-    mask_total = artifact > 0
+    mask_total = (artifact > 0) & clean_bool
     out[mask_total] = artifact[mask_total]
     out = _clip_uint8(out)
 
