@@ -19,7 +19,9 @@ from .config import UltraPhyxConfig
 class UltraPhyxAugmentor:
     def __init__(self, config: UltraPhyxConfig):
         self.cfg = config
-        np.random.seed(config.seed)
+        
+        # 5B: Use a local, modern random generator
+        self.rng = np.random.default_rng(config.seed)
 
         self.ops = {
             "mirror": add_mirror,
@@ -29,6 +31,23 @@ class UltraPhyxAugmentor:
             "speckle": adjust_speckle,
             "depth_atten": add_depth_attenuation,
         }
+
+        # -----------------------------------------
+        # INITIALIZATION VALIDATION
+        # -----------------------------------------
+        valid_modes = ["single", "any", "random_k"]
+        if self.cfg.mode not in valid_modes:
+            raise ValueError(f"Unknown mode '{self.cfg.mode}'. Supported modes are: {valid_modes}")
+
+        if not (0.0 <= self.cfg.p_global <= 1.0):
+            raise ValueError(f"p_global must be between 0.0 and 1.0, got {self.cfg.p_global}")
+
+        if not isinstance(self.cfg.k, int) or self.cfg.k < 0:
+            raise ValueError(f"k must be a non-negative integer, got {self.cfg.k}")
+
+        for name in (self.cfg.artifact_configs or {}).keys():
+            if name not in self.ops:
+                raise ValueError(f"Unknown artifact '{name}'. Supported artifacts: {list(self.ops.keys())}")
 
     # -----------------------------------------
     # tensor/np helpers
@@ -55,7 +74,8 @@ class UltraPhyxAugmentor:
         cfg = self.cfg.artifact_configs.get(artifact_name)
         if cfg is None:
             return {}
-        return {k: sample_param(v) for k, v in cfg.items()}
+        # 5B: Pass the local rng to sample_param
+        return {k: sample_param(v, rng=self.rng) for k, v in cfg.items()}
 
     # -----------------------------------------
     # CHOOSE ARTIFACTS BASED ON MODE
@@ -65,57 +85,90 @@ class UltraPhyxAugmentor:
         if len(names) == 0:
             return []
 
-        probs = np.array([self.cfg.artifact_probs.get(n, 0.1667) for n in names])
-        probs = probs / probs.sum()
-        mode = self.cfg.mode
+        weights = np.asarray([
+            self.cfg.artifact_probs.get(name, 0.1667)
+            for name in names
+        ], dtype=float)
+
+        if not np.isfinite(weights).all() or np.any(weights < 0):
+            raise ValueError("Artifact probabilities/weights must be finite and nonnegative.")
+
+        # ANY (Independent sampling)
+        if self.cfg.mode == "any":
+            if np.any(weights > 1):
+                raise ValueError("'any' mode requires probabilities between 0 and 1.")
+            return [
+                name for name, probability in zip(names, weights)
+                if self.rng.random() < probability
+            ]
+
+        # Only categorical selection modes normalize weights.
+        positive = weights > 0
+        if not positive.any():
+            return []
+
+        names = np.asarray(names, dtype=object)[positive]
+        weights = weights[positive]
+        probabilities = weights / weights.sum()
 
         # SINGLE
-        if mode == "single":
-            return [np.random.choice(names, p=probs)]
-
-        # ANY
-        if mode == "any":
-            return [n for n, p in zip(names, probs) if np.random.rand() < p]
+        if self.cfg.mode == "single":
+            return [self.rng.choice(names, p=probabilities)]
 
         # RANDOM_K
-        if mode == "random_k":
-            k = min(self.cfg.random_k, len(names))  # FIXED BUG
-            return list(np.random.choice(names, size=k, replace=False, p=probs))
+        if self.cfg.mode == "random_k":
+            k = min(self.cfg.k, len(names))
+            return list(self.rng.choice(names, size=k, replace=False, p=probabilities))
 
-        return []
+        raise ValueError(f"Mode '{self.cfg.mode}' is valid but not handled in selection.")
+
+    # -----------------------------------------
+    # 5C: SAMPLE AN AUGMENTATION PLAN
+    # -----------------------------------------
+    def sample_plan(self):
+        if self.rng.random() >= self.cfg.p_global:
+            return []
+        
+        plan = []
+        for name in self.choose_artifacts():
+            params = self.sample_artifact_parameters(name)
+            
+            # 5B: Set specific seeds for the operator to handle None properly
+            if params.get("seed") is None:
+                params["seed"] = int(self.rng.integers(0, 2**32))
+            params.setdefault("show_debug", False)
+            
+            plan.append((name, params))
+            
+        return plan
 
     # -----------------------------------------
     # MAIN AUGMENTATION CALL
     # -----------------------------------------
-    def __call__(self, img, analysis, show_choices: bool = False):
+    def __call__(self, img, analysis, show_choices: bool = False, plan: Optional[List] = None):
         """
-        show_choices=True, prints which artifacts are applied
+        show_choices=True, prints which artifacts are applied.
+        plan lets you pass a pre-sampled augmentation plan (for sequences).
         """
+        # 5C: Generate the plan if not provided
+        if plan is None:
+            plan = self.sample_plan()
+
+        if not plan:
+            if show_choices:
+                print("No artifacts applied.")
+            # 5C: Fast exit if no plan
+            return img.clone() if isinstance(img, torch.Tensor) else img.copy()
+
+        if show_choices:
+            print(f"Applying artifacts: {', '.join([n for n, p in plan])}")
+
         img_np = self._to_numpy(img)
         img_np = _ensure_uint8(img_np)
         out = img_np.copy()
 
-        # global probability
-        if np.random.rand() > self.cfg.p_global:
-            if show_choices:
-                print("No augmentation applied (p_global check failed).")
-            return self._to_tensor_like(out, img)
-
-        selected = self.choose_artifacts()
-
-        if show_choices:
-            if len(selected) == 0:
-                print("No artifacts selected.")
-            else:
-                print(f"Applying artifacts: {', '.join(selected)}")
-
-        if len(selected) == 0:
-            return self._to_tensor_like(out, img)
-
-        # apply artifacts
-        for name in selected:
-            op = self.ops[name]
-            params = self.sample_artifact_parameters(name)
-            out, _ = op(analysis, out, **params)
+        # 5C: apply artifacts loop with passed-down parameters
+        for name, params in plan:
+            out, info = self.ops[name](analysis, out, **params)
 
         return self._to_tensor_like(out, img)
